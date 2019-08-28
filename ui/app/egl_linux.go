@@ -11,6 +11,9 @@ package app
 #include <GLES3/gl3.h>
 */
 import "C"
+import (
+	"unsafe"
+)
 
 type (
 	_EGLint     = C.EGLint
@@ -80,4 +83,24 @@ func eglTerminate(disp _EGLDisplay) bool {
 
 func eglQueryString(disp _EGLDisplay, name _EGLint) string {
 	return C.GoString(C.eglQueryString(disp, name))
+}
+
+type eglWindow struct {
+	wl *wlEGLWindow
+}
+
+func (w *window) newEGLWindow(ew unsafe.Pointer, width, height int) (*eglWindow, error) {
+	return w.wl.newEGLWindow(ew, width, height)
+}
+
+func (w *eglWindow) window() unsafe.Pointer {
+	return w.wl.window()
+}
+
+func (w *eglWindow) resize(width, height int) {
+	w.wl.resize(width, height)
+}
+
+func (w *eglWindow) destroy() {
+	w.wl.destroy()
 }

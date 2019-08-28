@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"unsafe"
 
 	"gioui.org/ui/app/internal/gl"
 )
@@ -148,14 +149,14 @@ func (c *context) MakeCurrent() error {
 	}
 	if c.eglWin == nil {
 		var err error
-		c.eglWin, err = newEGLWindow(win, width, height)
+		c.eglWin, err = c.driver.newEGLWindow(unsafe.Pointer(win), width, height)
 		if err != nil {
 			return err
 		}
 	} else {
 		c.eglWin.resize(width, height)
 	}
-	eglSurf, err := createSurfaceAndMakeCurrent(c.eglCtx, c.eglWin.window())
+	eglSurf, err := createSurfaceAndMakeCurrent(c.eglCtx, _EGLNativeWindowType(c.eglWin.window()))
 	c.eglSurf = eglSurf
 	if err != nil {
 		c.eglWin.destroy()

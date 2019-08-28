@@ -24,28 +24,28 @@ type (
 	_EGLNativeWindowType  = C.EGLNativeWindowType
 )
 
-type eglWindow struct {
+type wlEGLWindow struct {
 	w *C.struct_wl_egl_window
 }
 
-func newEGLWindow(w _EGLNativeWindowType, width, height int) (*eglWindow, error) {
-	surf := (*C.struct_wl_surface)(unsafe.Pointer(w))
+func (w *wlWindow) newEGLWindow(ew unsafe.Pointer, width, height int) (*eglWindow, error) {
+	surf := (*C.struct_wl_surface)(ew)
 	win := C.wl_egl_window_create(surf, C.int(width), C.int(height))
 	if win == nil {
 		return nil, errors.New("wl_egl_create_window failed")
 	}
-	return &eglWindow{win}, nil
+	return &eglWindow{wl: &wlEGLWindow{w: win}}, nil
 }
 
-func (w *eglWindow) window() _EGLNativeWindowType {
-	return w.w
+func (w *wlEGLWindow) window() unsafe.Pointer {
+	return unsafe.Pointer(w.w)
 }
 
-func (w *eglWindow) resize(width, height int) {
+func (w *wlEGLWindow) resize(width, height int) {
 	C.wl_egl_window_resize(w.w, C.int(width), C.int(height), 0, 0)
 }
 
-func (w *eglWindow) destroy() {
+func (w *wlEGLWindow) destroy() {
 	C.wl_egl_window_destroy(w.w)
 }
 

@@ -87,7 +87,7 @@ type repeatState struct {
 	delay time.Duration
 
 	key   C.uint32_t
-	win   *window
+	win   *wlWindow
 	stopC chan struct{}
 
 	start time.Duration
@@ -96,7 +96,7 @@ type repeatState struct {
 	now   time.Duration
 }
 
-type window struct {
+type wlWindow struct {
 	w      *Window
 	disp   *C.struct_wl_display
 	surf   *C.struct_wl_surface
@@ -136,7 +136,7 @@ type wlOutput struct {
 	physHeight int
 	transform  C.int32_t
 	scale      int
-	windows    []*window
+	windows    []*wlWindow
 }
 
 var connMu sync.Mutex
@@ -144,7 +144,7 @@ var conn *wlConn
 var mainDone = make(chan struct{})
 
 var (
-	winMap       = make(map[interface{}]*window)
+	winMap       = make(map[interface{}]*wlWindow)
 	outputMap    = make(map[C.uint32_t]*C.struct_wl_output)
 	outputConfig = make(map[*C.struct_wl_output]*wlOutput)
 )
@@ -154,11 +154,7 @@ var (
 	_XKB_MOD_NAME_SHIFT = []byte("Shift\x00")
 )
 
-func main() {
-	<-mainDone
-}
-
-func createWindow(window *Window, opts *windowOptions) error {
+func createWindowWayland(win *Window, opts *windowOptions) error {
 	connMu.Lock()
 	defer connMu.Unlock()
 	if len(winMap) > 0 {
@@ -172,9 +168,9 @@ func createWindow(window *Window, opts *windowOptions) error {
 		conn.destroy()
 		return err
 	}
-	w.w = window
+	w.w = win
 	go func() {
-		w.w.setDriver(w)
+		w.w.setDriver(&window{wl: w})
 		w.setStage(StageRunning)
 		w.loop()
 		w.destroy()
@@ -184,7 +180,7 @@ func createWindow(window *Window, opts *windowOptions) error {
 	return nil
 }
 
-func createNativeWindow(opts *windowOptions) (*window, error) {
+func createNativeWindow(opts *windowOptions) (*wlWindow, error) {
 	pipe := make([]int, 2)
 	if err := syscall.Pipe2(pipe, syscall.O_NONBLOCK|syscall.O_CLOEXEC); err != nil {
 		return nil, fmt.Errorf("createNativeWindow: failed to create pipe: %v", err)
@@ -211,7 +207,7 @@ func createNativeWindow(opts *windowOptions) (*window, error) {
 		ppsp = minDensity
 	}
 
-	w := &window{
+	w := &wlWindow{
 		disp:     conn.disp,
 		scale:    scale,
 		newScale: scale != 1,
@@ -675,7 +671,7 @@ func gio_onKeyboardKey(data unsafe.Pointer, keyboard *C.struct_wl_keyboard, seri
 	}
 }
 
-func (r *repeatState) Start(w *window, keyCode C.uint32_t, t time.Duration) {
+func (r *repeatState) Start(w *wlWindow, keyCode C.uint32_t, t time.Duration) {
 	if r.rate <= 0 {
 		return
 	}
@@ -756,7 +752,7 @@ func gio_onFrameDone(data unsafe.Pointer, callback *C.struct_wl_callback, t C.ui
 	}
 }
 
-func (w *window) loop() {
+func (w *wlWindow) loop() {
 	dispfd := C.wl_display_get_fd(conn.disp)
 	// Poll for events and notifications.
 	pollfds := []syscall.PollFd{
@@ -809,7 +805,7 @@ loop:
 	}
 }
 
-func (w *window) setAnimating(anim bool) {
+func (w *wlWindow) setAnimating(anim bool) {
 	w.mu.Lock()
 	w.animating = anim
 	w.mu.Unlock()
@@ -819,14 +815,14 @@ func (w *window) setAnimating(anim bool) {
 }
 
 // Wakeup wakes up the event loop through the notification pipe.
-func (w *window) notify() {
+func (w *wlWindow) notify() {
 	oneByte := make([]byte, 1)
 	if _, err := syscall.Write(w.notWrite, oneByte); err != nil && err != syscall.EAGAIN {
 		panic(fmt.Errorf("failed to write to pipe: %v", err))
 	}
 }
 
-func (w *window) destroy() {
+func (w *wlWindow) destroy() {
 	if w.notWrite != 0 {
 		syscall.Close(w.notWrite)
 		w.notWrite = 0
@@ -852,7 +848,7 @@ func (w *window) destroy() {
 	}
 }
 
-func (w *window) dispatchKey(keyCode C.uint32_t) {
+func (w *wlWindow) dispatchKey(keyCode C.uint32_t) {
 	if len(conn.utf8Buf) == 0 {
 		conn.utf8Buf = make([]byte, 1)
 	}
@@ -955,7 +951,7 @@ func (c *wlOutput) ppmm() (float32, error) {
 	return density, nil
 }
 
-func (w *window) flushScroll() {
+func (w *wlWindow) flushScroll() {
 	if w.scroll == (f32.Point{}) {
 		return
 	}
@@ -981,7 +977,7 @@ func (w *window) flushScroll() {
 	w.discScroll.y = 0
 }
 
-func (w *window) onPointerMotion(x, y C.wl_fixed_t, t C.uint32_t) {
+func (w *wlWindow) onPointerMotion(x, y C.wl_fixed_t, t C.uint32_t) {
 	w.flushScroll()
 	w.lastPos = f32.Point{X: fromFixed(x), Y: fromFixed(y)}
 	w.w.event(pointer.Event{
@@ -992,14 +988,14 @@ func (w *window) onPointerMotion(x, y C.wl_fixed_t, t C.uint32_t) {
 	})
 }
 
-func (w *window) updateOpaqueRegion() {
+func (w *wlWindow) updateOpaqueRegion() {
 	reg := C.wl_compositor_create_region(conn.compositor)
 	C.wl_region_add(reg, 0, 0, C.int32_t(w.width), C.int32_t(w.height))
 	C.wl_surface_set_opaque_region(w.surf, reg)
 	C.wl_region_destroy(reg)
 }
 
-func (w *window) updateOutputs() {
+func (w *wlWindow) updateOutputs() {
 	scale := 1
 	var found bool
 	for _, conf := range outputConfig {
@@ -1026,7 +1022,7 @@ func (w *window) updateOutputs() {
 	}
 }
 
-func (w *window) config() (int, int, Config) {
+func (w *wlWindow) config() (int, int, Config) {
 	width, height := w.width*w.scale, w.height*w.scale
 	return width, height, Config{
 		pxPerDp: w.ppdp * float32(w.scale),
@@ -1034,7 +1030,7 @@ func (w *window) config() (int, int, Config) {
 	}
 }
 
-func (w *window) draw(sync bool) {
+func (w *wlWindow) draw(sync bool) {
 	w.mu.Lock()
 	animating := w.animating
 	dead := w.dead
@@ -1062,7 +1058,7 @@ func (w *window) draw(sync bool) {
 	})
 }
 
-func (w *window) setStage(s Stage) {
+func (w *wlWindow) setStage(s Stage) {
 	if s == w.stage {
 		return
 	}
@@ -1070,11 +1066,11 @@ func (w *window) setStage(s Stage) {
 	w.w.event(StageEvent{s})
 }
 
-func (w *window) display() unsafe.Pointer {
+func (w *wlWindow) display() unsafe.Pointer {
 	return unsafe.Pointer(w.disp)
 }
 
-func (w *window) nativeWindow(visID int) (unsafe.Pointer, int, int) {
+func (w *wlWindow) nativeWindow(visID int) (unsafe.Pointer, int, int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.needAck {
@@ -1089,7 +1085,7 @@ func (w *window) nativeWindow(visID int) (unsafe.Pointer, int, int) {
 	return unsafe.Pointer(w.surf), width * scale, height * scale
 }
 
-func (w *window) showTextInput(show bool) {}
+func (w *wlWindow) showTextInput(show bool) {}
 
 // detectFontScale reports current font scale, or 1.0
 // if it fails.
