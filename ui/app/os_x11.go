@@ -11,6 +11,7 @@ package app
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
+#include <X11/XKBlib.h>
 
 #define GIO_FIELD_OFFSET(typ, field) const int gio_##typ##_##field##_off = offsetof(typ, field)
 
@@ -25,6 +26,12 @@ GIO_FIELD_OFFSET(XButtonEvent, time);
 GIO_FIELD_OFFSET(XMotionEvent, x);
 GIO_FIELD_OFFSET(XMotionEvent, y);
 GIO_FIELD_OFFSET(XMotionEvent, time);
+GIO_FIELD_OFFSET(XkbAnyEvent, xkb_type);
+GIO_FIELD_OFFSET(XkbAnyEvent, time);
+GIO_FIELD_OFFSET(XkbStateNotifyEvent, keycode);
+GIO_FIELD_OFFSET(XkbStateNotifyEvent, event_type);
+GIO_FIELD_OFFSET(XkbStateNotifyEvent, req_major);
+GIO_FIELD_OFFSET(XkbStateNotifyEvent, req_minor);
 */
 import "C"
 import (
@@ -48,6 +55,14 @@ type x11Window struct {
 	width  int
 	height int
 	cfg    Config
+
+	xkb struct {
+		opcode  C.int
+		event   C.int
+		errcode C.int
+		major   C.int
+		minor   C.int
+	}
 }
 
 func (w *x11Window) setAnimating(anim bool) {
@@ -78,10 +93,6 @@ func (w *x11Window) loop() {
 		var xev xEvent
 		C.XNextEvent(w.x, (*C.XEvent)(unsafe.Pointer(&xev)))
 		switch xev.Type {
-		case C.KeyPress:
-			// TODO(dennwc): keyboard press
-		case C.KeyRelease:
-			// TODO(dennwc): keyboard release
 		case C.ButtonPress, C.ButtonRelease:
 			ev := pointer.Event{
 				Type:   pointer.Press,
@@ -136,6 +147,12 @@ func (w *x11Window) loop() {
 			switch xev.GetClientDataLong()[0] {
 			case C.long(w.evDelWindow):
 				return
+			}
+		case C.KeyPress, C.KeyRelease:
+			// TODO(dennwc): keyboard press
+		case w.xkb.event:
+			switch xev.GetXkbType() {
+			// TODO(dennwc): Xkb state
 			}
 		}
 	}
@@ -240,6 +257,16 @@ func (e *xEvent) GetClientDataLong() [5]C.long {
 	return *ptr
 }
 
+// GetXkbType returns a XkbEvent.any.xkb_type field.
+func (e *xEvent) GetXkbType() C.int {
+	return e.getInt(int(C.gio_XkbAnyEvent_xkb_type_off))
+}
+
+// GetXkbTime returns a XkbEvent.any.time field.
+func (e *xEvent) GetXkbTime() time.Duration {
+	return e.getUlongMs(int(C.gio_XkbAnyEvent_time_off))
+}
+
 var (
 	x11Threads sync.Once
 )
@@ -258,6 +285,16 @@ func createWindowX11(w *Window, opts *windowOptions) error {
 	if disp == nil {
 		return errors.New("x11: cannot connect to the X server")
 	}
+	xw := &x11Window{
+		w: w, x: disp,
+		cfg: Config{pxPerDp: 1, pxPerSp: 1}, // TODO(dennwc): real config
+	}
+	if C.XkbQueryExtension(disp, &xw.xkb.opcode, &xw.xkb.event, &xw.xkb.opcode, &xw.xkb.major, &xw.xkb.minor) == 0 {
+		C.XCloseDisplay(disp)
+		return errors.New("x11: Xkb is not supported")
+	}
+	C.XkbSelectEvents(disp, C.XkbUseCoreKbd, C.XkbAllEventsMask, C.XkbAllEventsMask)
+
 	root := C.XDefaultRootWindow(disp)
 
 	var swa C.XSetWindowAttributes
@@ -267,43 +304,36 @@ func createWindowX11(w *Window, opts *windowOptions) error {
 		C.PointerMotionMask | // mouse movement
 		C.StructureNotifyMask // resize
 
-	cfg := Config{pxPerDp: 1, pxPerSp: 1} // TODO(dennwc): real config
-	win := C.XCreateWindow(disp, root,
-		0, 0, C.uint(cfg.Px(opts.Width)), C.uint(cfg.Px(opts.Height)), 0,
+	xw.width, xw.height = xw.cfg.Px(opts.Width), xw.cfg.Px(opts.Width)
+	xw.xw = C.XCreateWindow(disp, root,
+		0, 0, C.uint(xw.width), C.uint(xw.height), 0,
 		C.CopyFromParent, C.InputOutput,
 		nil, C.CWEventMask|C.CWBackPixel,
 		&swa,
 	)
 
-	xw := &x11Window{
-		w: w, x: disp, xw: win,
-		width:  cfg.Px(opts.Width),
-		height: cfg.Px(opts.Height),
-		cfg:    cfg,
-	}
-
 	var xattr C.XSetWindowAttributes
 	xattr.override_redirect = C.False
-	C.XChangeWindowAttributes(disp, win, C.CWOverrideRedirect, &xattr)
+	C.XChangeWindowAttributes(disp, xw.xw, C.CWOverrideRedirect, &xattr)
 
 	var hints C.XWMHints
 	hints.input = C.True
 	hints.flags = C.InputHint
-	C.XSetWMHints(disp, win, &hints)
+	C.XSetWMHints(disp, xw.xw, &hints)
 
 	// make the window visible on the screen
-	C.XMapWindow(disp, win)
+	C.XMapWindow(disp, xw.xw)
 
 	// set the name
 	ctitle := C.CString(opts.Title)
-	C.XStoreName(disp, win, ctitle)
+	C.XStoreName(disp, xw.xw, ctitle)
 	C.free(unsafe.Pointer(ctitle))
 
 	// extensions
 	ckey := C.CString("WM_DELETE_WINDOW")
 	xw.evDelWindow = C.XInternAtom(disp, ckey, C.False)
 	C.free(unsafe.Pointer(ckey))
-	C.XSetWMProtocols(disp, win, &xw.evDelWindow, 1)
+	C.XSetWMProtocols(disp, xw.xw, &xw.evDelWindow, 1)
 
 	go func() {
 		xw.w.setDriver(&window{x11: xw})
