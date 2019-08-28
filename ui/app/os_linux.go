@@ -19,7 +19,7 @@ func createWindow(window *Window, opts *windowOptions) error {
 }
 
 type window struct {
-	x11 *x11Window
+	x11 *x11Display
 	wl  *wlWindow
 }
 

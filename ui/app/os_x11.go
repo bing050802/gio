@@ -45,17 +45,16 @@ import (
 	"gioui.org/ui/pointer"
 )
 
-type x11Window struct {
-	w  *Window
-	x  *C.Display
-	xw C.Window
+type x11Display struct {
+	w *Window
 
-	evDelWindow C.Atom
+	cfg     Config
+	disp    *C.Display
+	mainWin *x11Window
 
-	width  int
-	height int
-	cfg    Config
-
+	ext struct {
+		eventDelWindow C.Atom
+	}
 	xkb struct {
 		opcode  C.int
 		event   C.int
@@ -65,33 +64,49 @@ type x11Window struct {
 	}
 }
 
-func (w *x11Window) setAnimating(anim bool) {
+func (d *x11Display) xInternAtom(key string, onlyIfExists bool) C.Atom {
+	ckey := C.CString(key)
+	cexist := C.int(C.False)
+	if onlyIfExists {
+		cexist = C.True
+	}
+	atom := C.XInternAtom(d.disp, ckey, cexist)
+	C.free(unsafe.Pointer(ckey))
+	return atom
+}
+
+func (d *x11Display) setAnimating(anim bool) {
 	// TODO(dennwc): implement animation state
 }
 
-func (w *x11Window) showTextInput(show bool) {}
+func (d *x11Display) showTextInput(show bool) {}
 
-func (w *x11Window) display() unsafe.Pointer {
+func (d *x11Display) display() unsafe.Pointer {
 	// TODO(dennwc): We have an awesome X library written in pure Go, however,
 	//               we can't use it because of this specific function.
 	//               The *C.Display pointer is required to call eglGetDisplay,
 	//               so we can't really implement the call in pure Go.
 	//               Thus, we have to use Xlib for everything.
-	return unsafe.Pointer(w.x)
+	return unsafe.Pointer(d.disp)
 }
 
-func (w *x11Window) nativeWindow(visID int) (unsafe.Pointer, int, int) {
-	return unsafe.Pointer(uintptr(w.xw)), w.width, w.height
+func (d *x11Display) nativeWindow(visID int) (unsafe.Pointer, int, int) {
+	return unsafe.Pointer(uintptr(d.mainWin.w)), d.mainWin.width, d.mainWin.height
 }
 
-func (w *x11Window) setStage(s Stage) {
-	w.w.event(StageEvent{s})
+func (d *x11Display) setStage(s Stage) {
+	d.w.event(StageEvent{s})
 }
 
-func (w *x11Window) loop() {
+func (d *x11Display) nextEvent() xEvent {
+	var e xEvent
+	C.XNextEvent(d.disp, (*C.XEvent)(unsafe.Pointer(&e)))
+	return e
+}
+
+func (d *x11Display) loop() {
 	for {
-		var xev xEvent
-		C.XNextEvent(w.x, (*C.XEvent)(unsafe.Pointer(&xev)))
+		xev := d.nextEvent()
 		switch xev.Type {
 		case C.ButtonPress, C.ButtonRelease:
 			ev := pointer.Event{
@@ -121,10 +136,10 @@ func (w *x11Window) loop() {
 			default:
 				continue
 			}
-			w.w.event(ev)
-			w.draw()
+			d.w.event(ev)
+			d.draw()
 		case C.MotionNotify:
-			w.w.event(pointer.Event{
+			d.w.event(pointer.Event{
 				Type:   pointer.Move,
 				Source: pointer.Mouse,
 				Position: f32.Point{
@@ -133,24 +148,23 @@ func (w *x11Window) loop() {
 				},
 				Time: xev.GetMotionTime(),
 			})
-			w.draw()
+			d.draw()
 		case C.Expose: // update
-			w.draw()
+			d.draw()
 		case C.ConfigureNotify: // window configuration change
-			oldW, oldH := w.width, w.height
-			w.width = int(xev.GetConfigureWidth())
-			w.height = int(xev.GetConfigureHeight())
-			if oldW != w.width || oldH != w.height {
-				w.draw()
+			width, height := int(xev.GetConfigureWidth()), int(xev.GetConfigureHeight())
+			if curW, curH := d.mainWin.Size(); curW != width || curH != height {
+				d.mainWin.setSize(width, height)
+				d.draw()
 			}
 		case C.ClientMessage: // extensions
 			switch xev.GetClientDataLong()[0] {
-			case C.long(w.evDelWindow):
+			case C.long(d.ext.eventDelWindow):
 				return
 			}
 		case C.KeyPress, C.KeyRelease:
 			// TODO(dennwc): keyboard press
-		case w.xkb.event:
+		case d.xkb.event:
 			switch xev.GetXkbType() {
 			// TODO(dennwc): Xkb state
 			}
@@ -158,18 +172,18 @@ func (w *x11Window) loop() {
 	}
 }
 
-func (w *x11Window) destroy() {
-	C.XDestroyWindow(w.x, w.xw)
-	C.XCloseDisplay(w.x)
+func (d *x11Display) destroy() {
+	d.mainWin.Destroy()
+	C.XCloseDisplay(d.disp)
 }
 
-func (w *x11Window) draw() {
-	w.w.event(UpdateEvent{
+func (d *x11Display) draw() {
+	d.w.event(UpdateEvent{
 		Size: image.Point{
-			X: w.width,
-			Y: w.height,
+			X: d.mainWin.width,
+			Y: d.mainWin.height,
 		},
-		Config: w.cfg,
+		Config: d.cfg,
 		sync:   false,
 	})
 }
@@ -267,9 +281,7 @@ func (e *xEvent) GetXkbTime() time.Duration {
 	return e.getUlongMs(int(C.gio_XkbAnyEvent_time_off))
 }
 
-var (
-	x11Threads sync.Once
-)
+var x11Threads sync.Once
 
 func createWindowX11(w *Window, opts *windowOptions) error {
 	var err error
@@ -285,18 +297,29 @@ func createWindowX11(w *Window, opts *windowOptions) error {
 	if disp == nil {
 		return errors.New("x11: cannot connect to the X server")
 	}
-	xw := &x11Window{
-		w: w, x: disp,
+	xd := &x11Display{
+		w: w, disp: disp,
 		cfg: Config{pxPerDp: 1, pxPerSp: 1}, // TODO(dennwc): real config
 	}
-	if C.XkbQueryExtension(disp, &xw.xkb.opcode, &xw.xkb.event, &xw.xkb.opcode, &xw.xkb.major, &xw.xkb.minor) == 0 {
+	xd.ext.eventDelWindow = xd.xInternAtom("WM_DELETE_WINDOW", false)
+	if C.XkbQueryExtension(disp, &xd.xkb.opcode, &xd.xkb.event, &xd.xkb.opcode, &xd.xkb.major, &xd.xkb.minor) == 0 {
 		C.XCloseDisplay(disp)
 		return errors.New("x11: Xkb is not supported")
 	}
 	C.XkbSelectEvents(disp, C.XkbUseCoreKbd, C.XkbAllEventsMask, C.XkbAllEventsMask)
+	xd.mainWin = xd.newWindow(opts)
 
-	root := C.XDefaultRootWindow(disp)
+	go func() {
+		xd.w.setDriver(&window{x11: xd})
+		xd.setStage(StageRunning)
+		xd.loop()
+		xd.destroy()
+		close(mainDone)
+	}()
+	return nil
+}
 
+func (d *x11Display) newWindow(opts *windowOptions) *x11Window {
 	var swa C.XSetWindowAttributes
 	swa.event_mask = C.ExposureMask | // update
 		C.KeyPressMask | C.KeyReleaseMask | // keyboard
@@ -304,43 +327,68 @@ func createWindowX11(w *Window, opts *windowOptions) error {
 		C.PointerMotionMask | // mouse movement
 		C.StructureNotifyMask // resize
 
-	xw.width, xw.height = xw.cfg.Px(opts.Width), xw.cfg.Px(opts.Width)
-	xw.xw = C.XCreateWindow(disp, root,
-		0, 0, C.uint(xw.width), C.uint(xw.height), 0,
+	width, height := d.cfg.Px(opts.Width), d.cfg.Px(opts.Width)
+	xwin := C.XCreateWindow(d.disp, C.XDefaultRootWindow(d.disp),
+		0, 0, C.uint(width), C.uint(height), 0,
 		C.CopyFromParent, C.InputOutput,
 		nil, C.CWEventMask|C.CWBackPixel,
 		&swa,
 	)
+	w := &x11Window{d: d, w: xwin, width: width, height: height}
 
 	var xattr C.XSetWindowAttributes
 	xattr.override_redirect = C.False
-	C.XChangeWindowAttributes(disp, xw.xw, C.CWOverrideRedirect, &xattr)
+	C.XChangeWindowAttributes(d.disp, xwin, C.CWOverrideRedirect, &xattr)
 
 	var hints C.XWMHints
 	hints.input = C.True
 	hints.flags = C.InputHint
-	C.XSetWMHints(disp, xw.xw, &hints)
+	C.XSetWMHints(d.disp, xwin, &hints)
 
 	// make the window visible on the screen
-	C.XMapWindow(disp, xw.xw)
-
-	// set the name
-	ctitle := C.CString(opts.Title)
-	C.XStoreName(disp, xw.xw, ctitle)
-	C.free(unsafe.Pointer(ctitle))
-
+	w.show()
+	w.SetTitle(opts.Title)
 	// extensions
-	ckey := C.CString("WM_DELETE_WINDOW")
-	xw.evDelWindow = C.XInternAtom(disp, ckey, C.False)
-	C.free(unsafe.Pointer(ckey))
-	C.XSetWMProtocols(disp, xw.xw, &xw.evDelWindow, 1)
+	w.setWMProtocols(d.ext.eventDelWindow)
+	return w
+}
 
-	go func() {
-		xw.w.setDriver(&window{x11: xw})
-		xw.setStage(StageRunning)
-		xw.loop()
-		xw.destroy()
-		close(mainDone)
-	}()
-	return nil
+type x11Window struct {
+	d      *x11Display
+	w      C.Window
+	width  int
+	height int
+}
+
+func (w *x11Window) show() {
+	C.XMapWindow(w.d.disp, w.w)
+}
+
+func (w *x11Window) setWMProtocols(atoms ...C.Atom) {
+	C.XSetWMProtocols(w.d.disp, w.w, &atoms[0], C.int(len(atoms)))
+}
+
+func (w *x11Window) SetTitle(s string) {
+	cs := C.CString(s)
+	C.XStoreName(w.d.disp, w.w, cs)
+	C.free(unsafe.Pointer(cs))
+}
+
+func (w *x11Window) Size() (width, height int) {
+	return w.width, w.height
+}
+
+func (w *x11Window) setSize(width, height int) {
+	w.width, w.height = width, height
+}
+
+func (w *x11Window) Resize(width, height int) {
+	var change C.XWindowChanges
+	change.width = C.int(width)
+	change.height = C.int(height)
+	C.XConfigureWindow(w.d.disp, w.w, C.CWWidth|C.CWHeight, &change)
+}
+
+func (w *x11Window) Destroy() {
+	C.XDestroyWindow(w.d.disp, w.w)
 }
