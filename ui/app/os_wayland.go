@@ -54,6 +54,8 @@ import (
 */
 import "C"
 
+var errWLDisplayConnectFailed = errors.New("wayland: wl_display_connect failed")
+
 type wlConn struct {
 	disp         *C.struct_wl_display
 	compositor   *C.struct_wl_compositor
@@ -1110,7 +1112,7 @@ func waylandConnect() error {
 	c.disp = C.wl_display_connect(nil)
 	if c.disp == nil {
 		c.destroy()
-		return errors.New("wayland: wl_display_connect failed")
+		return errWLDisplayConnectFailed
 	}
 	reg := C.wl_display_get_registry(c.disp)
 	if reg == nil {
