@@ -86,21 +86,36 @@ func eglQueryString(disp _EGLDisplay, name _EGLint) string {
 }
 
 type eglWindow struct {
-	wl *wlEGLWindow
+	x11 *x11EGLWindow
+	wl  *wlEGLWindow
 }
 
 func (w *window) newEGLWindow(ew unsafe.Pointer, width, height int) (*eglWindow, error) {
-	return w.wl.newEGLWindow(ew, width, height)
+	if w.wl != nil {
+		return w.wl.newEGLWindow(ew, width, height)
+	}
+	return w.x11.newEGLWindow(ew, width, height)
 }
 
 func (w *eglWindow) window() unsafe.Pointer {
-	return w.wl.window()
+	if w.wl != nil {
+		return w.wl.window()
+	}
+	return w.x11.window()
 }
 
 func (w *eglWindow) resize(width, height int) {
-	w.wl.resize(width, height)
+	if w.wl != nil {
+		w.wl.resize(width, height)
+	} else {
+		w.x11.resize(width, height)
+	}
 }
 
 func (w *eglWindow) destroy() {
-	w.wl.destroy()
+	if w.wl != nil {
+		w.wl.destroy()
+	} else {
+		w.x11.destroy()
+	}
 }

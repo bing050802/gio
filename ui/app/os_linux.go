@@ -11,25 +11,44 @@ func main() {
 }
 
 func createWindow(window *Window, opts *windowOptions) error {
-	return createWindowWayland(window, opts)
+	err := createWindowWayland(window, opts)
+	if err == errWLDisplayConnectFailed {
+		return createWindowX11(window, opts)
+	}
+	return err
 }
 
 type window struct {
-	wl *wlWindow
+	x11 *x11Window
+	wl  *wlWindow
 }
 
 func (w *window) setAnimating(anim bool) {
-	w.wl.setAnimating(anim)
+	if w.wl != nil {
+		w.wl.setAnimating(anim)
+	} else {
+		w.x11.setAnimating(anim)
+	}
 }
 
 func (w *window) display() unsafe.Pointer {
-	return w.wl.display()
+	if w.wl != nil {
+		return w.wl.display()
+	}
+	return w.x11.display()
 }
 
 func (w *window) nativeWindow(visID int) (unsafe.Pointer, int, int) {
-	return w.wl.nativeWindow(visID)
+	if w.wl != nil {
+		return w.wl.nativeWindow(visID)
+	}
+	return w.x11.nativeWindow(visID)
 }
 
 func (w *window) showTextInput(show bool) {
-	w.wl.showTextInput(show)
+	if w.wl != nil {
+		w.wl.showTextInput(show)
+	} else {
+		w.x11.showTextInput(show)
+	}
 }
