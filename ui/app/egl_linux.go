@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Unlicense OR MIT
 
+// +build linux,!android
+
 package app
 
 /*
@@ -11,9 +13,6 @@ package app
 #include <GLES3/gl3.h>
 */
 import "C"
-import (
-	"unsafe"
-)
 
 type (
 	_EGLint     = C.EGLint
@@ -83,39 +82,4 @@ func eglTerminate(disp _EGLDisplay) bool {
 
 func eglQueryString(disp _EGLDisplay, name _EGLint) string {
 	return C.GoString(C.eglQueryString(disp, name))
-}
-
-type eglWindow struct {
-	x11 *x11EGLWindow
-	wl  *wlEGLWindow
-}
-
-func (w *window) newEGLWindow(ew unsafe.Pointer, width, height int) (*eglWindow, error) {
-	if w.wl != nil {
-		return w.wl.newEGLWindow(ew, width, height)
-	}
-	return w.x11.newEGLWindow(ew, width, height)
-}
-
-func (w *eglWindow) window() unsafe.Pointer {
-	if w.wl != nil {
-		return w.wl.window()
-	}
-	return w.x11.window()
-}
-
-func (w *eglWindow) resize(width, height int) {
-	if w.wl != nil {
-		w.wl.resize(width, height)
-	} else {
-		w.x11.resize(width, height)
-	}
-}
-
-func (w *eglWindow) destroy() {
-	if w.wl != nil {
-		w.wl.destroy()
-	} else {
-		w.x11.destroy()
-	}
 }
